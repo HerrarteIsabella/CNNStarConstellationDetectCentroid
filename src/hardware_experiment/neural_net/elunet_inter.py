@@ -1,12 +1,75 @@
 import torch
 import torch.nn as nn
-from .elunet_parts import DoubleConv,DownSample,UpSample,OutConv
-from .mobile_unet import get_inference_time
+import torch.nn.functional as F
 from thop import profile
 
 
+class DoubleConv(nn.Module):
+    """ [(Conv2d) => (BN) => (ReLu)] * 2 """
+    
+    def __init__(self,in_channels,out_channels) -> None:
+        super().__init__()
+        self.double_conv = nn.Sequential(
+                nn.Conv2d(in_channels,out_channels,3,padding=1,stride=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(),
+                nn.Conv2d(out_channels,out_channels,3,padding=1,stride=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU()      
+            )
 
-class ELUnet(nn.Module):
+    def forward(self,x):
+        return self.double_conv(x)
+
+
+
+
+
+class DownSample(nn.Module):
+    """ MaxPool => DoubleConv """
+    def __init__(self,in_channels,out_channels) -> None:
+        super().__init__()
+        self.down_sample = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels,out_channels)
+        )
+    def forward(self,x):
+        x  = self.down_sample(x)
+        return x
+     
+
+
+
+class UpSample(nn.Module):
+    def __init__(self,in_channels,out_channels,c:int) -> None:
+        """ UpSample input tensor by a factor of `c`
+                - the value of base 2 log c defines the number of upsample 
+                layers that will be applied
+        """
+        super().__init__()
+        self.scale_factor = c
+        self.conv_3 = nn.Conv2d(in_channels,out_channels,3,padding=1,stride=1)
+
+    def forward(self,x):
+        if self.scale_factor != 0:
+            x = F.interpolate( x, scale_factor=self.scale_factor, mode='bilinear', align_corners=True )
+        x= self.conv_3(x)      
+        return x      
+
+
+
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(OutConv, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+    def forward(self, x):
+        return self.conv(x)
+
+
+
+
+class ELUnet_Inter(nn.Module):
     def __init__(self,in_channels,out_channels,n:int = 8) -> None:
         """ 
         Construct the Elu-net model.
@@ -18,7 +81,7 @@ class ELUnet(nn.Module):
                 the number of parameters of the model. Defaults to n = 8, which is recommended by the 
                 authors of the paper.
         """
-        super().__init__()
+        super(ELUnet_Inter, self).__init__()
         # ------ Input convolution --------------
         self.in_conv = DoubleConv(in_channels,n)
         # -------- Encoder ----------------------
@@ -33,14 +96,18 @@ class ELUnet(nn.Module):
         self.up_8n_n = UpSample(8*n,n,8)
         self.up_8n_2n = UpSample(8*n,2*n,4)
         self.up_8n_4n = UpSample(8*n,4*n,2)
+        self.up_8n_4n_2 = UpSample(8*n,4*n,2)
         self.up_8n_8n = UpSample(8*n,8*n,0)
 
         self.up_4n_n = UpSample(4*n,n,4)
         self.up_4n_2n = UpSample(4*n,2*n,2)
+        self.up_4n_2n_2 = UpSample(4*n,2*n,2)
         self.up_4n_4n = UpSample(4*n,4*n,0)
 
         self.up_2n_n = UpSample(2*n,n,2)
+        self.up_2n_n_2 = UpSample(2*n,n,2)
         self.up_2n_2n = UpSample(2*n,2*n,0)
+        
 
         self.up_n_n = UpSample(n,n,0)
      
@@ -67,7 +134,7 @@ class ELUnet(nn.Module):
 
         x_up_2 = self.up_8n_4n(x_dec_4)
         x_dec_3 = self.dec_3(torch.cat([x_up_2,
-            self.up_8n_4n(x_enc_3),
+            self.up_8n_4n_2(x_enc_3),
             self.up_4n_4n(x_enc_2)
             ],
         dim=1)) # 4n
@@ -76,7 +143,7 @@ class ELUnet(nn.Module):
         x_dec_2 = self.dec_2(torch.cat([
             x_up_3,
             self.up_8n_2n(x_enc_3),
-            self.up_4n_2n(x_enc_2),
+            self.up_4n_2n_2(x_enc_2),
             self.up_2n_2n(x_enc_1)
         ],dim=1)) # 2n
 
@@ -85,9 +152,10 @@ class ELUnet(nn.Module):
             x_up_4,
             self.up_8n_n(x_enc_3),
             self.up_4n_n(x_enc_2),
-            self.up_2n_n(x_enc_1),
+            self.up_2n_n_2(x_enc_1),
             self.up_n_n(x)
         ],dim=1)) # n
+
 
         return self.out_conv(x_dec_1)
     
@@ -95,11 +163,14 @@ class ELUnet(nn.Module):
 
 
 if __name__ == "__main__":
+    from mobile_unet import get_inference_time
+
     print("[ELU-Net]")
 
-    device = torch.device("cuda:0")
+    #device = torch.device("cuda:0")
+    device = torch.device("cpu")
     dummy_input = torch.rand(1, 1, 480, 640).to(device)
-    model = ELUnet(1,2,8).to(device)
+    model = ELUnet_Inter(1,2,8).to(device)
 
     # get inference time 
     mean_inference_time = get_inference_time(model, dummy_input)

@@ -4,60 +4,46 @@ import torch.nn.functional as F
 from thop import profile
 
 
-
-
-class InvertedResidualBlock(nn.Module):
-    """
-    inverted residual block used in MobileNetV2
-    """
-    def __init__(self, in_c, out_c, stride, expansion_factor=6):
-        super(InvertedResidualBlock, self).__init__()
-        # check stride value
-        assert stride in [1, 2]
-        # Skip connection if stride is 1
-        self.use_skip_connection = True if stride == 1 else False
-
-        # expansion factor or t as mentioned in the paper
-        ex_c = int(in_c * expansion_factor)
-        self.conv = nn.Sequential(
-            # pointwise convolution
-            nn.Conv2d(in_c, ex_c, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(ex_c),
-            nn.ReLU6(inplace=True),
-            # depthwise convolution
-            nn.Conv2d(ex_c, ex_c, 3, stride, 1, groups=ex_c, bias=False),
-            nn.BatchNorm2d(ex_c),
-            nn.ReLU6(inplace=True),
-            # pointwise convolution
-            nn.Conv2d(ex_c, out_c, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(out_c),
-        )
-        self.use_conv1x1 =  False if in_c == out_c else True
-        self.conv1x1 = nn.Conv2d(in_c, out_c, 1, 1, 0, bias=False)
-
-    def forward(self, x):
-        if self.use_skip_connection:
-            out = self.conv(x)
-            if self.use_conv1x1:
-                x = self.conv1x1(x)
-            return x+out
-        else:
-            return self.conv(x)
-
+class DoubleConv(nn.Module):
+    """ [(Conv2d) => (BN) => (ReLu)] * 2 """
     
-
-
-class DoubleConv(nn.Module):    
-    def __init__(self,c_in, t, c_out, s):
+    def __init__(self,in_channels,out_channels):
         super(DoubleConv, self).__init__()
-        self.IR_1 =InvertedResidualBlock(c_in, c_out, s, t)
-        self.IR_2 = InvertedResidualBlock(c_out, c_out, 1, t)
+        self.double_conv = nn.Sequential(
+                nn.Conv2d(in_channels,out_channels,3,padding=1,stride=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(),
+                nn.Conv2d(out_channels,out_channels,3,padding=1,stride=1),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU()      
+            )
+        
+        self.use_conv1x1 =  False if in_channels == out_channels else True
+        self.conv1x1 = nn.Conv2d(in_channels, out_channels, 1, 1, 0)
     def forward(self,x):
-        x = self.IR_1(x)
-        x = self.IR_2(x)
-        return x
+        out = self.double_conv(x)
+        if self.use_conv1x1:
+                x = self.conv1x1(x)
+        return x+out
 
+
+
+
+
+
+class DownSample(nn.Module):
+    """ MaxPool => DoubleConv """
+    def __init__(self,in_channels,out_channels):
+        super(DownSample, self).__init__()
+        self.down_sample = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels,out_channels)
+        )
+    def forward(self,x):
+        x  = self.down_sample(x)
+        return x
      
+
 
 
 class UpSample(nn.Module):
@@ -89,7 +75,7 @@ class OutConv(nn.Module):
 
 
 
-class ELUnet_Mobile(nn.Module):
+class ELUnet_ResNet34(nn.Module):
     def __init__(self,in_channels,out_channels,n:int = 8):
         """ 
         Construct the Elu-net model.
@@ -101,14 +87,14 @@ class ELUnet_Mobile(nn.Module):
                 the number of parameters of the model. Defaults to n = 8, which is recommended by the 
                 authors of the paper.
         """
-        super(ELUnet_Mobile, self).__init__()
+        super(ELUnet_ResNet34, self).__init__()
         # ------ Input convolution --------------
-        self.in_conv = DoubleConv(in_channels, 3, n, 1)
+        self.in_conv = DoubleConv(in_channels,n)
         # -------- Encoder ----------------------
-        self.down_1 = DoubleConv(n, 2, 2*n, 2)
-        self.down_2 = DoubleConv(2*n, 2, 4*n, 2)
-        self.down_3 = DoubleConv(4*n, 2, 8*n, 2)
-        self.down_4 = DoubleConv(8*n, 2, 16*n, 2)
+        self.down_1 = DownSample(n,2*n)
+        self.down_2 = DownSample(2*n,4*n)
+        self.down_3 = DownSample(4*n,8*n)
+        self.down_4 = DownSample(8*n,16*n)
         
         # -------- Upsampling ------------------
         self.up_16n_8n = UpSample(16*n,8*n,2)
@@ -132,10 +118,10 @@ class ELUnet_Mobile(nn.Module):
         self.up_n_n = UpSample(n,n,0)
      
         # ------ Decoder block ---------------
-        self.dec_4 = DoubleConv(2*8*n, 2, 8*n, 1)
-        self.dec_3 = DoubleConv(3*4*n, 2, 4*n, 1)
-        self.dec_2 = DoubleConv(4*2*n, 2, 2*n, 1)
-        self.dec_1 = DoubleConv(5*n, 2, n, 1)
+        self.dec_4 = DoubleConv(2*8*n,8*n)
+        self.dec_3 = DoubleConv(3*4*n,4*n)
+        self.dec_2 = DoubleConv(4*2*n,2*n)
+        self.dec_1 = DoubleConv(5*n,n)
         # ------ Output convolution
 
         self.out_conv = OutConv(n,out_channels)
@@ -185,11 +171,12 @@ class ELUnet_Mobile(nn.Module):
 if __name__ == "__main__":
     from mobile_unet import get_inference_time
 
-    print("[ELUnet_Mobile]")
+    print("[ELU-Net]")
 
-    device = torch.device("cuda:0")
+    #device = torch.device("cuda:0")
+    device = torch.device("cpu")
     dummy_input = torch.rand(1, 1, 480, 640).to(device)
-    model = ELUnet_Mobile(1,2,8).to(device)
+    model = ELUnet_ResNet34(1,2,8).to(device)
 
     # get inference time 
     mean_inference_time = get_inference_time(model, dummy_input)

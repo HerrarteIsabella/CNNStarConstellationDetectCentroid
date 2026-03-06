@@ -86,7 +86,8 @@ class CentroidNet(nn.Module):
 
 if __name__ == "__main__":
     
-    device = torch.device("cuda:0")
+    #device = torch.device("cuda:0")
+    device = torch.device("cpu")
     model = CentroidNet( enc_chs=(1, 64, 128, 256, 512, 1024), dec_chs=(1024, 512, 256, 128, 64), num_class = 2 ).to(device)
     input = torch.randn(1, 1, 480, 640).to(device)
 

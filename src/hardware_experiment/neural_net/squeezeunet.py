@@ -8,26 +8,13 @@ class fire_module(nn.Module):
     def __init__(self, c_in, c_out_p, c_out, s, transpose=False):
         super(fire_module, self).__init__()
 
-        self.conv_1 = nn.Sequential( nn.Conv2d(c_in, c_out_p, kernel_size=1, bias=False), nn.BatchNorm2d(c_out_p), nn.ReLU6(inplace=True) )
+        self.conv_1 = nn.Sequential( nn.Conv2d(c_in, c_out_p, kernel_size=1), nn.BatchNorm2d(c_out_p), nn.ReLU6(inplace=True) )
         
-        self.conv_2 = nn.Sequential( 
-                                    nn.Conv2d(c_out_p, c_out_p, kernel_size=3, stride=s, padding=1, groups=c_out_p, bias=False), 
-                                    nn.BatchNorm2d(c_out_p), 
-                                    nn.ReLU6(inplace=True),
-                                    nn.Conv2d(c_out_p,int(c_out/2), kernel_size=1, bias=False), 
-                                    nn.BatchNorm2d(int(c_out/2)), 
-                                    nn.ReLU6(inplace=True),
-                                    )
-        self.conv_3 = nn.Sequential( nn.Conv2d(c_out_p, int(c_out/2), kernel_size=1, stride=s, bias=False), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
+        self.conv_2 = nn.Sequential( nn.Conv2d(c_out_p, int(c_out/2), kernel_size=3, stride=s, padding=1), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
+        self.conv_3 = nn.Sequential( nn.Conv2d(c_out_p, int(c_out/2), kernel_size=1, stride=s), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
 
-        self.conv_2_T = nn.Sequential(  nn.ConvTranspose2d(c_out_p, c_out_p, kernel_size=2, stride=2, groups=c_out_p, bias=False), 
-                                        nn.BatchNorm2d(c_out_p), 
-                                        nn.ReLU6(inplace=True),
-                                        nn.Conv2d(c_out_p, int(c_out/2), kernel_size=1, bias=False),
-                                        nn.BatchNorm2d(int(c_out/2)), 
-                                        nn.ReLU6(inplace=True),
-                                    )
-        self.conv_3_T = nn.Sequential( nn.ConvTranspose2d(c_out_p, int(c_out/2), kernel_size=1, stride=2, bias=False), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
+        self.conv_2_T = nn.Sequential( nn.ConvTranspose2d(c_out_p, int(c_out/2), kernel_size=2, stride=2), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
+        self.conv_3_T = nn.Sequential( nn.ConvTranspose2d(c_out_p, int(c_out/2), kernel_size=1, stride=2), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
 
         self.trnaspose = transpose
 
@@ -53,20 +40,8 @@ class fire_module(nn.Module):
 class convolution_block(nn.Module):
     def __init__(self, c_in, c_out):
         super(convolution_block, self).__init__()
-        self.conv_1 = nn.Sequential(    nn.Conv2d(c_in, c_in, kernel_size=3, padding=1, groups=c_in, bias=False), 
-                                        nn.BatchNorm2d(c_in), 
-                                        nn.ReLU6(inplace=True), 
-                                        nn.Conv2d(c_in, c_out, kernel_size=1, bias=False),
-                                        nn.BatchNorm2d(c_out),
-                                        nn.ReLU6(inplace=True), 
-                                    )
-        self.conv_2 = nn.Sequential(    nn.Conv2d(c_out, c_out, kernel_size=3, padding=1, groups=c_out, bias=False), 
-                                        nn.BatchNorm2d(c_out), 
-                                        nn.ReLU6(inplace=True), 
-                                        nn.Conv2d(c_out, c_out, kernel_size=1, bias=False),
-                                        nn.BatchNorm2d(c_out),
-                                        nn.ReLU6(inplace=True), 
-                                    )    
+        self.conv_1 = nn.Sequential( nn.Conv2d(c_in, c_out, kernel_size=3, padding=1), nn.BatchNorm2d(c_out), nn.ReLU6(inplace=True) )
+        self.conv_2 = nn.Sequential( nn.Conv2d(c_out, c_out, kernel_size=3, padding=1), nn.BatchNorm2d(c_out), nn.ReLU6(inplace=True) )
     def forward(self,x):
         x = self.conv_1(x)
         x = self.conv_2(x)
@@ -104,9 +79,9 @@ class Up_Sample(nn.Module):
 
 
 
-class squeeze_unet_M(nn.Module):
+class squeeze_unet(nn.Module):
     def __init__(self, c_in, c_out):
-        super(squeeze_unet_M, self).__init__()
+        super(squeeze_unet, self).__init__()
         self.convblock_1 = convolution_block(c_in, 64)
         
         self.DS1 = Down_Sample(64, 32, 128)
@@ -118,7 +93,7 @@ class squeeze_unet_M(nn.Module):
         self.US2 = Up_Sample(512, 64, 48, 256)
         self.US3 = Up_Sample(256, 48, 32, 128)
 
-        self.convT = nn.Sequential(nn.ConvTranspose2d(128, 64, 2, 2, bias=False), nn.BatchNorm2d(64), nn.ReLU6(inplace=True) )
+        self.convT = nn.Sequential(nn.ConvTranspose2d(128, 64, 2, 2), nn.BatchNorm2d(64), nn.ReLU6(inplace=True) )
         self.convblock_2 = convolution_block(128, 64)
         self.conv_out = nn.Conv2d(64, c_out, 1)
 
@@ -156,11 +131,12 @@ class squeeze_unet_M(nn.Module):
 
 if __name__ == "__main__":
     from mobile_unet import get_inference_time
-    print("Squeeze UNet M")
+    print("Squeeze UNet")
 
-    device = torch.device("cuda:0")
+    #device = torch.device("cuda:0")
+    device = torch.device("cpu")
     dummy_input = torch.rand(1, 1, 480, 640).to(device)
-    model = squeeze_unet_M(1, 2).to(device)
+    model = squeeze_unet(1, 2).to(device)
 
     # get inference time 
     mean_inference_time = get_inference_time(model, dummy_input)

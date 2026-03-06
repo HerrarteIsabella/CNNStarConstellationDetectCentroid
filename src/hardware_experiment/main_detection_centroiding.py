@@ -22,8 +22,8 @@ import pandas as pd
 from tqdm import trange
 import os 
 
-device = torch.device("cuda:0")
-
+#device = torch.device("cuda:0")
+device = torch.device("cpu")
 
 # rotate star tracker body frame 
 from math import sin, cos, radians
@@ -419,7 +419,7 @@ def main_camera(args):
     # load neural net
     #model = torch.load("./saved_models/ELUNet_inter_2_90.pt").to(device)
     model = torch.load("/home/jetson/Documents/star_sense/AI_Star_Tracker-/hardware/star_tracker_simulator_detect/saved_models/ELUnet_B10_50.pt").to(device)
-    #model = torch.load("./saved_models/MobileUNet_B10_50.pt").to(device)
+    #model = torch.load("./saved_models/MobileUNet_B10_50.pt", map_location=torch.device('cpu')).to(device)
 
     model.eval()
 
@@ -534,7 +534,7 @@ def main_video(args):
 
     # load neural net
     #model = torch.load("./saved_models/ELUNet_inter_2_90.pt").to(device)
-    model = torch.load("./saved_models/MobileUNet_B10_50.pt").to(device)
+    model = torch.load("./saved_models/MobileUNet_B10_50.pt", map_location=torch.device('cpu')).to(device)
 
     model.eval()
 
@@ -597,8 +597,83 @@ def main_video(args):
     np.save(f'./saved_results/id_rate_{args.mode}_{i}.npy', np.asarray(id_rate))
     np.save(f'./saved_results/animation_{args.mode}_{i}.npy', np.asarray(animation))
 
+def main_image(args):
+    detection_vis_radius = 15
+    geometric_voting_obj = geometric_voting()
+    
+    model = None
+    if args.mode == 'NN':
+        model = torch.load("./saved_models/MobileUNet_B10_50.pt", map_location=torch.device('cpu')).to(device)
+        model.eval()
+    
+    img = cv2.imread(args.image_file, cv2.IMREAD_GRAYSCALE)
+    img = img.astype('float32')
+    
+    # procesar por parches con solapamiento
+    tile_h, tile_w = 480, 640
+    overlap = 64  # solapamiento entre tiles
+    img_h, img_w = img.shape
+    centroid_est = []
 
+    for row in range(0, img_h, tile_h - overlap):
+        for col in range(0, img_w, tile_w - overlap):
+            # recortar parche real (sin padding)
+            r_end = min(row + tile_h, img_h)
+            c_end = min(col + tile_w, img_w)
+            patch = img[row:r_end, col:c_end]
+            ph, pw = patch.shape
+            
+            # skip parches demasiado pequeños
+            if ph < 64 or pw < 64:
+                continue
+            
+            # padding solo si es necesario
+            if ph < tile_h or pw < tile_w:
+                padded = np.zeros((tile_h, tile_w), dtype='float32')
+                padded[:ph, :pw] = patch
+                patch = padded
+            
+            # zona válida (evitar bordes con overlap/2)
+            margin = overlap // 2
+            valid_r0 = margin if row > 0 else 0
+            valid_c0 = margin if col > 0 else 0
+            valid_r1 = ph - margin if r_end < img_h else ph
+            valid_c1 = pw - margin if c_end < img_w else pw
 
+            if args.mode == 'NN':
+                patch_centroids = run_neural_net(patch.copy(), model)
+            elif args.mode == 'baseline':
+                patch_centroids = run_baseline(patch.copy())
+            
+            for c in patch_centroids:
+                lx, ly = c[0], c[1]
+                # solo conservar detecciones dentro de la zona válida del parche
+                if valid_c0 <= lx < valid_c1 and valid_r0 <= ly < valid_r1:
+                    centroid_est.append([lx + col, ly + row])
+
+    # eliminar duplicados cercanos
+    filtered = []
+    for c in centroid_est:
+        if all(np.sqrt((c[0]-f[0])**2 + (c[1]-f[1])**2) > 10 for f in filtered):
+            filtered.append(c)
+    centroid_est = filtered
+
+    print(f"Centroides detectados: {len(centroid_est)}")
+    for i, c in enumerate(centroid_est):
+        print(f"  Estrella {i}: x={c[0]:.2f} px, y={c[1]:.2f} px")
+    
+    # visualizar
+    img_rgb = cv2.cvtColor(np.clip(img*3, 0, 255).astype('uint8'), cv2.COLOR_GRAY2RGB)
+    for c in centroid_est:
+        cx, cy = int(c[0]), int(c[1])
+        cv2.circle(img_rgb, (cx, cy), detection_vis_radius, (0, 255, 0), 1)
+    
+    output_path = args.image_file.replace('.png', '_result.png')
+    cv2.imwrite(output_path, img_rgb)
+    print(f"Resultado guardado en: {output_path}")
+    cv2.imshow('Resultado', img_rgb)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
@@ -610,7 +685,7 @@ if __name__ == '__main__':
     parser.add_argument("--save_video", action='store_true')
     parser.add_argument("--input", type=str, default='camera')
     parser.add_argument("--video_file", type=str, default=None)
-
+    parser.add_argument("--image_file", type=str, default=None)
 
     args = parser.parse_args() 
 
@@ -618,6 +693,8 @@ if __name__ == '__main__':
         main_camera(args)
     elif args.input == 'video':
         main_video(args)
+    elif args.input == 'image':
+        main_image(args)
     else:
         print('Wrong Input Type')
 

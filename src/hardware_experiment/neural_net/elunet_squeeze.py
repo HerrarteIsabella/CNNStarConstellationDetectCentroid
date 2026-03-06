@@ -4,46 +4,37 @@ import torch.nn.functional as F
 from thop import profile
 
 
-class DoubleConv(nn.Module):
-    """ [(Conv2d) => (BN) => (ReLu)] * 2 """
-    
-    def __init__(self,in_channels,out_channels):
-        super(DoubleConv, self).__init__()
-        self.double_conv = nn.Sequential(
-                nn.Conv2d(in_channels,out_channels,3,padding=1,stride=1),
-                nn.BatchNorm2d(out_channels),
-                nn.ReLU(),
-                nn.Conv2d(out_channels,out_channels,3,padding=1,stride=1),
-                nn.BatchNorm2d(out_channels),
-                nn.ReLU()      
-            )
-        
-        self.use_conv1x1 =  False if in_channels == out_channels else True
-        self.conv1x1 = nn.Conv2d(in_channels, out_channels, 1, 1, 0)
+
+
+class fire_module(nn.Module):
+    def __init__(self, c_in, c_out_p, c_out, s):
+        super(fire_module, self).__init__()
+
+        self.conv_1 = nn.Sequential( nn.Conv2d(c_in, c_out_p, kernel_size=1, bias=False), nn.BatchNorm2d(c_out_p), nn.ReLU6(inplace=True) )
+        self.conv_2 = nn.Sequential( nn.Conv2d(c_out_p, int(c_out/2), kernel_size=3, stride=s, padding=1, bias=False), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
+        self.conv_3 = nn.Sequential( nn.Conv2d(c_out_p, int(c_out/2), kernel_size=1, stride=s, bias=False), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
+
     def forward(self,x):
-        out = self.double_conv(x)
-        if self.use_conv1x1:
-                x = self.conv1x1(x)
-        return x+out
-
-
-
-
-
-
-class DownSample(nn.Module):
-    """ MaxPool => DoubleConv """
-    def __init__(self,in_channels,out_channels):
-        super(DownSample, self).__init__()
-        self.down_sample = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels,out_channels)
-        )
-    def forward(self,x):
-        x  = self.down_sample(x)
+        x = self.conv_1(x)
+        x_1 = self.conv_2(x)
+        x_2 = self.conv_3(x)
+        x = torch.cat([x_1, x_2], dim=1)
         return x
-     
+    
 
+
+
+class DoubleConv(nn.Module):    
+    def __init__(self,c_in, c_out_p, c_out, s):
+        super(DoubleConv, self).__init__()
+        self.fire_module_1 =fire_module(c_in, c_out_p, c_out, s)
+        self.fire_module_2 = fire_module(c_out, c_out_p, c_out, 1)
+    def forward(self,x):
+        x = self.fire_module_1(x)
+        x = self.fire_module_2(x)
+        return x
+
+     
 
 
 class UpSample(nn.Module):
@@ -75,7 +66,7 @@ class OutConv(nn.Module):
 
 
 
-class ELUnet_ResNet34(nn.Module):
+class ELUnet_squeeze(nn.Module):
     def __init__(self,in_channels,out_channels,n:int = 8):
         """ 
         Construct the Elu-net model.
@@ -87,14 +78,14 @@ class ELUnet_ResNet34(nn.Module):
                 the number of parameters of the model. Defaults to n = 8, which is recommended by the 
                 authors of the paper.
         """
-        super(ELUnet_ResNet34, self).__init__()
+        super(ELUnet_squeeze, self).__init__()
         # ------ Input convolution --------------
-        self.in_conv = DoubleConv(in_channels,n)
+        self.in_conv = DoubleConv(in_channels, int(n/2), n, 1)
         # -------- Encoder ----------------------
-        self.down_1 = DownSample(n,2*n)
-        self.down_2 = DownSample(2*n,4*n)
-        self.down_3 = DownSample(4*n,8*n)
-        self.down_4 = DownSample(8*n,16*n)
+        self.down_1 = DoubleConv(n, int(n/2), 2*n, 2)
+        self.down_2 = DoubleConv(2*n, n, 4*n, 2)
+        self.down_3 = DoubleConv(4*n, 2*n, 8*n, 2)
+        self.down_4 = DoubleConv(8*n, 4*n, 16*n, 2)
         
         # -------- Upsampling ------------------
         self.up_16n_8n = UpSample(16*n,8*n,2)
@@ -118,10 +109,10 @@ class ELUnet_ResNet34(nn.Module):
         self.up_n_n = UpSample(n,n,0)
      
         # ------ Decoder block ---------------
-        self.dec_4 = DoubleConv(2*8*n,8*n)
-        self.dec_3 = DoubleConv(3*4*n,4*n)
-        self.dec_2 = DoubleConv(4*2*n,2*n)
-        self.dec_1 = DoubleConv(5*n,n)
+        self.dec_4 = DoubleConv(2*8*n, 4*n, 8*n, 1)
+        self.dec_3 = DoubleConv(3*4*n, 2*n, 4*n, 1)
+        self.dec_2 = DoubleConv(4*2*n, n, 2*n, 1)
+        self.dec_1 = DoubleConv(5*n, int(n/2), n, 1)
         # ------ Output convolution
 
         self.out_conv = OutConv(n,out_channels)
@@ -173,9 +164,10 @@ if __name__ == "__main__":
 
     print("[ELU-Net]")
 
-    device = torch.device("cuda:0")
+    #device = torch.device("cuda:0")
+    device = torch.device("cpu")
     dummy_input = torch.rand(1, 1, 480, 640).to(device)
-    model = ELUnet_ResNet34(1,2,8).to(device)
+    model = ELUnet_squeeze(1,2,8).to(device)
 
     # get inference time 
     mean_inference_time = get_inference_time(model, dummy_input)

@@ -1,73 +1,13 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from .elunet_parts import DoubleConv,DownSample,UpSample,OutConv
+from .mobile_unet import get_inference_time
 from thop import profile
 
 
 
-
-class fire_module(nn.Module):
-    def __init__(self, c_in, c_out_p, c_out, s):
-        super(fire_module, self).__init__()
-
-        self.conv_1 = nn.Sequential( nn.Conv2d(c_in, c_out_p, kernel_size=1, bias=False), nn.BatchNorm2d(c_out_p), nn.ReLU6(inplace=True) )
-        self.conv_2 = nn.Sequential( nn.Conv2d(c_out_p, int(c_out/2), kernel_size=3, stride=s, padding=1, bias=False), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
-        self.conv_3 = nn.Sequential( nn.Conv2d(c_out_p, int(c_out/2), kernel_size=1, stride=s, bias=False), nn.BatchNorm2d(int(c_out/2)), nn.ReLU6(inplace=True) )
-
-    def forward(self,x):
-        x = self.conv_1(x)
-        x_1 = self.conv_2(x)
-        x_2 = self.conv_3(x)
-        x = torch.cat([x_1, x_2], dim=1)
-        return x
-    
-
-
-
-class DoubleConv(nn.Module):    
-    def __init__(self,c_in, c_out_p, c_out, s):
-        super(DoubleConv, self).__init__()
-        self.fire_module_1 =fire_module(c_in, c_out_p, c_out, s)
-        self.fire_module_2 = fire_module(c_out, c_out_p, c_out, 1)
-    def forward(self,x):
-        x = self.fire_module_1(x)
-        x = self.fire_module_2(x)
-        return x
-
-     
-
-
-class UpSample(nn.Module):
-    def __init__(self,in_channels,out_channels,c:int):
-        """ UpSample input tensor by a factor of `c`
-                - the value of base 2 log c defines the number of upsample 
-                layers that will be applied
-        """
-        super(UpSample, self).__init__()
-        self.scale_factor = c
-        self.conv_3 = nn.Conv2d(in_channels,out_channels,3,padding=1,stride=1)
-
-    def forward(self,x):
-        if self.scale_factor != 0:
-            x = F.interpolate( x, scale_factor=self.scale_factor, mode='bilinear', align_corners=True )
-        x= self.conv_3(x)      
-        return x      
-
-
-
-
-class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(OutConv, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-    def forward(self, x):
-        return self.conv(x)
-
-
-
-
-class ELUnet_squeeze(nn.Module):
-    def __init__(self,in_channels,out_channels,n:int = 8):
+class ELUnet(nn.Module):
+    def __init__(self,in_channels,out_channels,n:int = 8) -> None:
         """ 
         Construct the Elu-net model.
         Args:
@@ -78,14 +18,14 @@ class ELUnet_squeeze(nn.Module):
                 the number of parameters of the model. Defaults to n = 8, which is recommended by the 
                 authors of the paper.
         """
-        super(ELUnet_squeeze, self).__init__()
+        super().__init__()
         # ------ Input convolution --------------
-        self.in_conv = DoubleConv(in_channels, int(n/2), n, 1)
+        self.in_conv = DoubleConv(in_channels,n)
         # -------- Encoder ----------------------
-        self.down_1 = DoubleConv(n, int(n/2), 2*n, 2)
-        self.down_2 = DoubleConv(2*n, n, 4*n, 2)
-        self.down_3 = DoubleConv(4*n, 2*n, 8*n, 2)
-        self.down_4 = DoubleConv(8*n, 4*n, 16*n, 2)
+        self.down_1 = DownSample(n,2*n)
+        self.down_2 = DownSample(2*n,4*n)
+        self.down_3 = DownSample(4*n,8*n)
+        self.down_4 = DownSample(8*n,16*n)
         
         # -------- Upsampling ------------------
         self.up_16n_8n = UpSample(16*n,8*n,2)
@@ -93,26 +33,22 @@ class ELUnet_squeeze(nn.Module):
         self.up_8n_n = UpSample(8*n,n,8)
         self.up_8n_2n = UpSample(8*n,2*n,4)
         self.up_8n_4n = UpSample(8*n,4*n,2)
-        self.up_8n_4n_2 = UpSample(8*n,4*n,2)
         self.up_8n_8n = UpSample(8*n,8*n,0)
 
         self.up_4n_n = UpSample(4*n,n,4)
         self.up_4n_2n = UpSample(4*n,2*n,2)
-        self.up_4n_2n_2 = UpSample(4*n,2*n,2)
         self.up_4n_4n = UpSample(4*n,4*n,0)
 
         self.up_2n_n = UpSample(2*n,n,2)
-        self.up_2n_n_2 = UpSample(2*n,n,2)
         self.up_2n_2n = UpSample(2*n,2*n,0)
-        
 
         self.up_n_n = UpSample(n,n,0)
      
         # ------ Decoder block ---------------
-        self.dec_4 = DoubleConv(2*8*n, 4*n, 8*n, 1)
-        self.dec_3 = DoubleConv(3*4*n, 2*n, 4*n, 1)
-        self.dec_2 = DoubleConv(4*2*n, n, 2*n, 1)
-        self.dec_1 = DoubleConv(5*n, int(n/2), n, 1)
+        self.dec_4 = DoubleConv(2*8*n,8*n)
+        self.dec_3 = DoubleConv(3*4*n,4*n)
+        self.dec_2 = DoubleConv(4*2*n,2*n)
+        self.dec_1 = DoubleConv(5*n,n)
         # ------ Output convolution
 
         self.out_conv = OutConv(n,out_channels)
@@ -131,7 +67,7 @@ class ELUnet_squeeze(nn.Module):
 
         x_up_2 = self.up_8n_4n(x_dec_4)
         x_dec_3 = self.dec_3(torch.cat([x_up_2,
-            self.up_8n_4n_2(x_enc_3),
+            self.up_8n_4n(x_enc_3),
             self.up_4n_4n(x_enc_2)
             ],
         dim=1)) # 4n
@@ -140,7 +76,7 @@ class ELUnet_squeeze(nn.Module):
         x_dec_2 = self.dec_2(torch.cat([
             x_up_3,
             self.up_8n_2n(x_enc_3),
-            self.up_4n_2n_2(x_enc_2),
+            self.up_4n_2n(x_enc_2),
             self.up_2n_2n(x_enc_1)
         ],dim=1)) # 2n
 
@@ -149,10 +85,9 @@ class ELUnet_squeeze(nn.Module):
             x_up_4,
             self.up_8n_n(x_enc_3),
             self.up_4n_n(x_enc_2),
-            self.up_2n_n_2(x_enc_1),
+            self.up_2n_n(x_enc_1),
             self.up_n_n(x)
         ],dim=1)) # n
-
 
         return self.out_conv(x_dec_1)
     
@@ -160,13 +95,12 @@ class ELUnet_squeeze(nn.Module):
 
 
 if __name__ == "__main__":
-    from mobile_unet import get_inference_time
-
     print("[ELU-Net]")
 
-    device = torch.device("cuda:0")
+    #device = torch.device("cuda:0")
+    device = torch.device("cpu")
     dummy_input = torch.rand(1, 1, 480, 640).to(device)
-    model = ELUnet_squeeze(1,2,8).to(device)
+    model = ELUnet(1,2,8).to(device)
 
     # get inference time 
     mean_inference_time = get_inference_time(model, dummy_input)
